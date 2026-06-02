@@ -1566,6 +1566,8 @@ function LivePageClient() {
 
   // 播放器初始化
   useEffect(() => {
+    let cancelled = false;
+
     const preload = async () => {
       if (
         !Artplayer ||
@@ -1597,12 +1599,14 @@ function LivePageClient() {
         try {
           const precheckUrl = `/api/live/precheck?url=${encodeURIComponent(videoUrl)}&moontv-source=${currentSourceRef.current?.key || ''}`;
           const precheckResponse = await fetch(precheckUrl);
+          if (cancelled) return;
           if (!precheckResponse.ok) {
             console.error('预检查失败:', precheckResponse.statusText);
             setIsVideoLoading(false);
             return;
           }
           const precheckResult = await precheckResponse.json();
+          if (cancelled) return;
           if (precheckResult?.success && precheckResult?.type) {
             type = precheckResult.type;
           } else {
@@ -1618,6 +1622,8 @@ function LivePageClient() {
       }
 
       // 如果不是 m3u8、flv 或 mp4 类型，设置不支持的类型并返回
+      if (cancelled) return;
+
       if (type !== 'm3u8' && type !== 'flv' && type !== 'mp4') {
         setUnsupportedType(type);
         setIsVideoLoading(false);
@@ -1644,6 +1650,8 @@ function LivePageClient() {
       try {
         // 创建新的播放器实例
         Artplayer.USE_RAF = true;
+
+        if (cancelled) return;
 
         artPlayerRef.current = new Artplayer({
           container: artRef.current,
@@ -1813,6 +1821,10 @@ function LivePageClient() {
       }
     }
     preload();
+
+    return () => {
+      cancelled = true;
+    };
   }, [Artplayer, Hls, videoUrl, currentChannel, loading]);
 
   // 清理播放器资源
