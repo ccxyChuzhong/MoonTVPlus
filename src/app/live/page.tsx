@@ -1488,13 +1488,14 @@ function LivePageClient() {
       }
     }
 
+    // 直播只保留短缓冲，防止长时间观看时浏览器内存持续堆高。
     const hls = new Hls({
       debug: false,
       enableWorker: true,
       lowLatencyMode: true,
-      maxBufferLength: 30,
-      backBufferLength: 30,
-      maxBufferSize: 60 * 1000 * 1000,
+      maxBufferLength: 20,
+      backBufferLength: 10,
+      maxBufferSize: 30 * 1000 * 1000,
       loader: CustomHlsJsLoader,
     });
 
@@ -1540,11 +1541,21 @@ function LivePageClient() {
       }
     }
 
-    const flvPlayer = flvjs.createPlayer({
-      type: 'flv',
-      url,
-      isLive: true
-    });
+    const flvPlayer = flvjs.createPlayer(
+      {
+        type: 'flv',
+        url,
+        isLive: true
+      },
+      {
+        // 直播不需要额外 stash 缓冲，关闭后可降低内存持续增长风险。
+        enableStashBuffer: false,
+        stashInitialSize: 128,
+        autoCleanupSourceBuffer: true,
+        autoCleanupMaxBackwardDuration: 30,
+        autoCleanupMinBackwardDuration: 10,
+      }
+    );
     flvPlayer.attachMediaElement(video);
     flvPlayer.on(flvjs.Events.ERROR, (errorType: string, errorDetail: string) => {
       console.error('FLV.js error:', errorType, errorDetail);

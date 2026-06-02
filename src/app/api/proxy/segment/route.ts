@@ -24,6 +24,17 @@ export async function GET(request: Request) {
   let response: Response | null = null;
   let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
+  // 统一释放 reader，避免直播切台或请求中断后仍占用上游流资源。
+  const releaseReader = () => {
+    if (!reader) return;
+    try {
+      reader.releaseLock();
+    } catch (e) {
+      // Reader may already be released after cancel/error.
+    }
+    reader = null;
+  };
+
   try {
     const decodedUrl = decodeURIComponent(url);
     response = await fetch(decodedUrl, {
@@ -43,8 +54,9 @@ export async function GET(request: Request) {
     headers.set('Accept-Ranges', 'bytes');
     headers.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
 
-    // 使用流式传输，避免占用内存
-    const stream = new ReadableStream({
+    // 客户端取消播放时停止 pump，避免继续读取已无消费者的直播分片。
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         if (!response?.body) {
           controller.close();
@@ -52,63 +64,48 @@ export async function GET(request: Request) {
         }
 
         reader = response.body.getReader();
-        const isCancelled = false;
 
-        function pump() {
-          if (isCancelled || !reader) {
-            return;
-          }
+        const pump = (): void => {
+          if (cancelled || !reader) return;
 
           reader.read().then(({ done, value }) => {
-            if (isCancelled) {
-              return;
-            }
+            if (cancelled || !reader) return;
 
             if (done) {
               controller.close();
-              cleanup();
+              releaseReader();
               return;
             }
 
             controller.enqueue(value);
             pump();
           }).catch((error) => {
-            if (!isCancelled) {
+            if (!cancelled) {
               controller.error(error);
-              cleanup();
             }
+            releaseReader();
           });
-        }
-
-        function cleanup() {
-          if (reader) {
-            try {
-              reader.releaseLock();
-            } catch (e) {
-              // reader 可能已经被释放，忽略错误
-            }
-            reader = null;
-          }
-        }
+        };
 
         pump();
       },
-      cancel() {
-        // 当流被取消时，确保释放所有资源
+      async cancel() {
+        cancelled = true;
+
         if (reader) {
           try {
-            reader.releaseLock();
+            await reader.cancel();
           } catch (e) {
-            // reader 可能已经被释放，忽略错误
+            // Ignore cancellation errors.
           }
-          reader = null;
+          releaseReader();
         }
 
         if (response?.body) {
           try {
-            response.body.cancel();
+            await response.body.cancel();
           } catch (e) {
-            // 忽略取消时的错误
+            // Ignore cancellation errors.
           }
         }
       }
@@ -116,20 +113,13 @@ export async function GET(request: Request) {
 
     return new Response(stream, { headers });
   } catch (error) {
-    // 确保在错误情况下也释放资源
-    if (reader) {
-      try {
-        (reader as ReadableStreamDefaultReader<Uint8Array>).releaseLock();
-      } catch (e) {
-        // 忽略错误
-      }
-    }
+    releaseReader();
 
     if (response?.body) {
       try {
-        response.body.cancel();
+        await response.body.cancel();
       } catch (e) {
-        // 忽略错误
+        // Ignore cancellation errors.
       }
     }
 

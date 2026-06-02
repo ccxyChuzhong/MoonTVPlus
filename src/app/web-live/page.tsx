@@ -141,7 +141,25 @@ export default function WebLivePage() {
 
   function m3u8Loader(video: HTMLVideoElement, url: string) {
     if (!Hls) return;
-    const hls = new Hls({ debug: false, enableWorker: true, lowLatencyMode: true });
+    // 切换直播源或重建播放器前，先释放旧的 HLS 实例，避免 SourceBuffer 残留。
+    if ((video as any).hls) {
+      try {
+        (video as any).hls.destroy();
+      } catch (err) {
+        console.warn('Failed to destroy previous HLS instance:', err);
+      }
+      (video as any).hls = null;
+    }
+
+    // 直播只保留短缓冲，防止长时间观看时浏览器内存持续堆高。
+    const hls = new Hls({
+      debug: false,
+      enableWorker: true,
+      lowLatencyMode: true,
+      maxBufferLength: 20,
+      backBufferLength: 10,
+      maxBufferSize: 30 * 1000 * 1000,
+    });
     hls.loadSource(url);
     hls.attachMedia(video);
     (video as any).hls = hls;
@@ -149,7 +167,30 @@ export default function WebLivePage() {
 
   function flvLoader(video: HTMLVideoElement, url: string) {
     if (!flvjs) return;
-    const flvPlayer = flvjs.createPlayer({ type: 'flv', url, isLive: true });
+    // 切换 FLV 直播前销毁旧实例，确保网络流和媒体缓冲被释放。
+    if ((video as any).flv) {
+      try {
+        if ((video as any).flv.unload) {
+          (video as any).flv.unload();
+        }
+        (video as any).flv.destroy();
+      } catch (err) {
+        console.warn('Failed to destroy previous FLV instance:', err);
+      }
+      (video as any).flv = null;
+    }
+
+    const flvPlayer = flvjs.createPlayer(
+      { type: 'flv', url, isLive: true },
+      {
+        // 直播不需要额外 stash 缓冲，关闭后可降低内存持续增长风险。
+        enableStashBuffer: false,
+        stashInitialSize: 128,
+        autoCleanupSourceBuffer: true,
+        autoCleanupMaxBackwardDuration: 30,
+        autoCleanupMinBackwardDuration: 10,
+      }
+    );
     flvPlayer.attachMediaElement(video);
     flvPlayer.on(flvjs.Events.ERROR, (errorType: string, errorDetail: string) => {
       console.error('FLV.js error:', errorType, errorDetail);
