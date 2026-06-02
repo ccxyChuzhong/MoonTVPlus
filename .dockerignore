@@ -1,5 +1,46 @@
+# secrets / local env
 .env
 .env*.local
+
+# dependency and package manager caches
+node_modules
+.pnpm-store
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# build outputs / caches
+.next
+out
+dist
+build
+coverage
+.cache
+.turbo
+.vercel
+.docker-cache*
+*.tsbuildinfo
+
+# git / editor / OS files
+.git
+.gitignore
+.github
+.claude
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# local runtime data
+.data
+*.db
+*.db-shm
+*.db-wal
+logs
+*.log
+
+# large docs/assets not needed for image build
 public/screenshot1.png
 public/screenshot2.png
 public/screenshot3.png

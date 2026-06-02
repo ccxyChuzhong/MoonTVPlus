@@ -33,6 +33,7 @@ export async function GET(request: Request) {
       cache: 'no-cache',
       redirect: 'follow',
       credentials: 'same-origin',
+      signal: request.signal,
       headers: {
         'User-Agent': ua,
       },
@@ -74,7 +75,8 @@ export async function GET(request: Request) {
     headers.set('Cache-Control', 'no-cache');
     headers.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
 
-    // 直接返回视频流
+    // 直接返回视频流；body 已交给响应，不能在 finally 里再取消。
+    responseUsed = true;
     return new Response(response.body, {
       status: 200,
       headers,

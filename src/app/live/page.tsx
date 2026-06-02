@@ -33,6 +33,71 @@ let Artplayer: any = null;
 let Hls: any = null;
 let flvjs: any = null;
 
+const LIVE_HLS_MAX_BUFFER_SECONDS = 15;
+const LIVE_HLS_BACK_BUFFER_SECONDS = 5;
+const LIVE_HLS_MAX_BUFFER_SIZE = 12 * 1000 * 1000;
+
+function removeVideoSources(video: HTMLVideoElement) {
+  Array.from(video.getElementsByTagName('source')).forEach((source) => {
+    source.remove();
+  });
+}
+
+function resetVideoElement(video: HTMLVideoElement | null) {
+  if (!video) return;
+
+  try {
+    video.pause();
+  } catch (err) {
+    // ignore
+  }
+
+  removeVideoSources(video);
+
+  try {
+    video.removeAttribute('src');
+    video.src = '';
+    video.load();
+  } catch (err) {
+    // ignore
+  }
+}
+
+function destroyHlsInstance(video: HTMLVideoElement | null) {
+  const hls = video?.hls;
+  if (!hls) return;
+
+  try {
+    hls.stopLoad?.();
+    hls.detachMedia?.();
+    hls.destroy?.();
+  } catch (err) {
+    console.warn('清理 HLS 实例时出错:', err);
+  }
+
+  if (video) {
+    video.hls = null;
+  }
+}
+
+function destroyFlvInstance(video: HTMLVideoElement | null) {
+  const flv = video?.flv;
+  if (!flv) return;
+
+  try {
+    flv.pause?.();
+    flv.unload?.();
+    flv.detachMediaElement?.();
+    flv.destroy?.();
+  } catch (err) {
+    console.warn('清理 FLV 实例时出错:', err);
+  }
+
+  if (video) {
+    video.flv = null;
+  }
+}
+
 // 直播频道接口
 interface LiveChannel {
   id: string;
@@ -1062,36 +1127,12 @@ function LivePageClient() {
 
     if (artPlayerRef.current) {
       try {
-        // 先暂停播放
-        if (artPlayerRef.current.video) {
-          artPlayerRef.current.video.pause();
-          artPlayerRef.current.video.src = '';
-          artPlayerRef.current.video.load();
-        }
+        const video = artPlayerRef.current.video as HTMLVideoElement | null;
 
-        // 销毁 HLS 实例
-        if (artPlayerRef.current.video && artPlayerRef.current.video.hls) {
-          artPlayerRef.current.video.hls.destroy();
-          artPlayerRef.current.video.hls = null;
-        }
-
-        // 销毁 FLV 实例 - 增强清理逻辑
-        if (artPlayerRef.current.video && artPlayerRef.current.video.flv) {
-          try {
-            // 先停止加载
-            if (artPlayerRef.current.video.flv.unload) {
-              artPlayerRef.current.video.flv.unload();
-            }
-            // 销毁播放器
-            artPlayerRef.current.video.flv.destroy();
-            // 确保引用被清空
-            artPlayerRef.current.video.flv = null;
-          } catch (flvError) {
-            console.warn('FLV实例销毁时出错:', flvError);
-            // 强制清空引用
-            artPlayerRef.current.video.flv = null;
-          }
-        }
+        // 先销毁 MSE 播放实例，再清空 video，避免 SourceBuffer/网络请求残留。
+        destroyHlsInstance(video);
+        destroyFlvInstance(video);
+        resetVideoElement(video);
 
         // 移除所有事件监听器
         artPlayerRef.current.off('ready');
@@ -1111,7 +1152,7 @@ function LivePageClient() {
     }
   };
 
-  // 确保视频源正确设置
+  // 仅 MP4 / 原生播放需要 <source>；HLS/FLV 由 hls.js/flv.js 接管时不要再塞 source。
   const ensureVideoSource = (video: HTMLVideoElement | null, url: string) => {
     if (!video || !url) return;
     const sources = Array.from(video.getElementsByTagName('source'));
@@ -1478,24 +1519,22 @@ function LivePageClient() {
       }
     }
 
-    // 清理之前的 HLS 实例
-    if (video.hls) {
-      try {
-        video.hls.destroy();
-        video.hls = null;
-      } catch (err) {
-        console.warn('清理 HLS 实例时出错:', err);
-      }
-    }
+    // 清理之前的播放实例和原生 source，避免 hls.js/flv.js 与浏览器原生播放并存。
+    destroyHlsInstance(video);
+    destroyFlvInstance(video);
+    resetVideoElement(video);
 
     // 直播只保留短缓冲，防止长时间观看时浏览器内存持续堆高。
     const hls = new Hls({
       debug: false,
       enableWorker: true,
       lowLatencyMode: true,
-      maxBufferLength: 20,
-      backBufferLength: 10,
-      maxBufferSize: 30 * 1000 * 1000,
+      maxBufferLength: LIVE_HLS_MAX_BUFFER_SECONDS,
+      maxMaxBufferLength: LIVE_HLS_MAX_BUFFER_SECONDS,
+      backBufferLength: LIVE_HLS_BACK_BUFFER_SECONDS,
+      liveBackBufferLength: LIVE_HLS_BACK_BUFFER_SECONDS,
+      maxBufferSize: LIVE_HLS_MAX_BUFFER_SIZE,
+      frontBufferFlushThreshold: LIVE_HLS_MAX_BUFFER_SECONDS,
       loader: CustomHlsJsLoader,
     });
 
@@ -1528,18 +1567,10 @@ function LivePageClient() {
       return;
     }
 
-    // 清理之前的 FLV 实例
-    if (video.flv) {
-      try {
-        if (video.flv.unload) {
-          video.flv.unload();
-        }
-        video.flv.destroy();
-        video.flv = null;
-      } catch (err) {
-        console.warn('清理 FLV 实例时出错:', err);
-      }
-    }
+    // 清理之前的播放实例和原生 source，避免 MSE 实例与浏览器原生播放并存。
+    destroyHlsInstance(video);
+    destroyFlvInstance(video);
+    resetVideoElement(video);
 
     const flvPlayer = flvjs.createPlayer(
       {
@@ -1567,6 +1598,7 @@ function LivePageClient() {
   // 播放器初始化
   useEffect(() => {
     let cancelled = false;
+    const abortController = new AbortController();
 
     const preload = async () => {
       if (
@@ -1598,7 +1630,9 @@ function LivePageClient() {
         // 全量代理或仅代理m3u8：通过服务器预检查
         try {
           const precheckUrl = `/api/live/precheck?url=${encodeURIComponent(videoUrl)}&moontv-source=${currentSourceRef.current?.key || ''}`;
-          const precheckResponse = await fetch(precheckUrl);
+          const precheckResponse = await fetch(precheckUrl, {
+            signal: abortController.signal,
+          });
           if (cancelled) return;
           if (!precheckResponse.ok) {
             console.error('预检查失败:', precheckResponse.statusText);
@@ -1615,6 +1649,7 @@ function LivePageClient() {
             return;
           }
         } catch (err) {
+          if (cancelled || abortController.signal.aborted) return;
           console.error('预检查异常:', err);
           setIsVideoLoading(false);
           return;
@@ -1809,10 +1844,14 @@ function LivePageClient() {
         });
 
         if (artPlayerRef.current?.video) {
-          ensureVideoSource(
-            artPlayerRef.current.video as HTMLVideoElement,
-            targetUrl
-          );
+          if (type === 'mp4') {
+            ensureVideoSource(
+              artPlayerRef.current.video as HTMLVideoElement,
+              targetUrl
+            );
+          } else {
+            removeVideoSources(artPlayerRef.current.video as HTMLVideoElement);
+          }
         }
 
       } catch (err) {
@@ -1824,6 +1863,7 @@ function LivePageClient() {
 
     return () => {
       cancelled = true;
+      abortController.abort();
     };
   }, [Artplayer, Hls, videoUrl, currentChannel, loading]);
 

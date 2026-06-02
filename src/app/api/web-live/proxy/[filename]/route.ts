@@ -58,6 +58,7 @@ export async function GET(request: NextRequest) {
     }
 
     const streamRes = await fetch(url, {
+      signal: request.signal,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Referer': referer

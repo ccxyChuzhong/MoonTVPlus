@@ -31,6 +31,7 @@ export async function GET(request: NextRequest) {
       cache: 'no-cache',
       redirect: 'follow',
       credentials: 'same-origin',
+      signal: request.signal,
       headers: {
         'User-Agent': ua,
       },
@@ -45,7 +46,7 @@ export async function GET(request: NextRequest) {
     const finalUrl = response.url || decodedUrl;
     const normalizedUrl = finalUrl.toLowerCase().split('?')[0];
     if (response.body) {
-      response.body.cancel();
+      await response.body.cancel();
     }
     if (normalizedContentType.includes('video/mp4') || normalizedUrl.endsWith('.mp4')) {
       return NextResponse.json({ success: true, type: 'mp4' }, { status: 200 });

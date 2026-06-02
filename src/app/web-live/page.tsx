@@ -13,6 +13,71 @@ let Artplayer: any = null;
 let Hls: any = null;
 let flvjs: any = null;
 
+const LIVE_HLS_MAX_BUFFER_SECONDS = 15;
+const LIVE_HLS_BACK_BUFFER_SECONDS = 5;
+const LIVE_HLS_MAX_BUFFER_SIZE = 12 * 1000 * 1000;
+
+function removeVideoSources(video: HTMLVideoElement) {
+  Array.from(video.getElementsByTagName('source')).forEach((source) => {
+    source.remove();
+  });
+}
+
+function resetVideoElement(video: HTMLVideoElement | null) {
+  if (!video) return;
+
+  try {
+    video.pause();
+  } catch (err) {
+    // ignore
+  }
+
+  removeVideoSources(video);
+
+  try {
+    video.removeAttribute('src');
+    video.src = '';
+    video.load();
+  } catch (err) {
+    // ignore
+  }
+}
+
+function destroyHlsInstance(video: HTMLVideoElement | null) {
+  const hls = (video as any)?.hls;
+  if (!hls) return;
+
+  try {
+    hls.stopLoad?.();
+    hls.detachMedia?.();
+    hls.destroy?.();
+  } catch (err) {
+    console.warn('Failed to destroy HLS instance:', err);
+  }
+
+  if (video) {
+    (video as any).hls = null;
+  }
+}
+
+function destroyFlvInstance(video: HTMLVideoElement | null) {
+  const flv = (video as any)?.flv;
+  if (!flv) return;
+
+  try {
+    flv.pause?.();
+    flv.unload?.();
+    flv.detachMediaElement?.();
+    flv.destroy?.();
+  } catch (err) {
+    console.warn('Failed to destroy FLV instance:', err);
+  }
+
+  if (video) {
+    (video as any).flv = null;
+  }
+}
+
 export default function WebLivePage() {
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -34,6 +99,8 @@ export default function WebLivePage() {
   const [isWebLiveEnabled, setIsWebLiveEnabled] = useState<boolean | null>(null);
   const [librariesLoaded, setLibrariesLoaded] = useState(false);
   const hasAutoLoadedRef = useRef(false); // 防止重复自动加载
+  const sourceRequestIdRef = useRef(0);
+  const sourceAbortControllerRef = useRef<AbortController | null>(null);
 
   // 观影室同步功能
   const webLiveSync = useWebLiveSync({
@@ -141,24 +208,22 @@ export default function WebLivePage() {
 
   function m3u8Loader(video: HTMLVideoElement, url: string) {
     if (!Hls) return;
-    // 切换直播源或重建播放器前，先释放旧的 HLS 实例，避免 SourceBuffer 残留。
-    if ((video as any).hls) {
-      try {
-        (video as any).hls.destroy();
-      } catch (err) {
-        console.warn('Failed to destroy previous HLS instance:', err);
-      }
-      (video as any).hls = null;
-    }
+    // 切换直播源或重建播放器前，先释放旧实例和原生 source，避免 SourceBuffer 残留。
+    destroyHlsInstance(video);
+    destroyFlvInstance(video);
+    resetVideoElement(video);
 
     // 直播只保留短缓冲，防止长时间观看时浏览器内存持续堆高。
     const hls = new Hls({
       debug: false,
       enableWorker: true,
       lowLatencyMode: true,
-      maxBufferLength: 20,
-      backBufferLength: 10,
-      maxBufferSize: 30 * 1000 * 1000,
+      maxBufferLength: LIVE_HLS_MAX_BUFFER_SECONDS,
+      maxMaxBufferLength: LIVE_HLS_MAX_BUFFER_SECONDS,
+      backBufferLength: LIVE_HLS_BACK_BUFFER_SECONDS,
+      liveBackBufferLength: LIVE_HLS_BACK_BUFFER_SECONDS,
+      maxBufferSize: LIVE_HLS_MAX_BUFFER_SIZE,
+      frontBufferFlushThreshold: LIVE_HLS_MAX_BUFFER_SECONDS,
     });
     hls.loadSource(url);
     hls.attachMedia(video);
@@ -167,18 +232,10 @@ export default function WebLivePage() {
 
   function flvLoader(video: HTMLVideoElement, url: string) {
     if (!flvjs) return;
-    // 切换 FLV 直播前销毁旧实例，确保网络流和媒体缓冲被释放。
-    if ((video as any).flv) {
-      try {
-        if ((video as any).flv.unload) {
-          (video as any).flv.unload();
-        }
-        (video as any).flv.destroy();
-      } catch (err) {
-        console.warn('Failed to destroy previous FLV instance:', err);
-      }
-      (video as any).flv = null;
-    }
+    // 切换 FLV 直播前销毁旧实例和原生 source，确保网络流和媒体缓冲被释放。
+    destroyHlsInstance(video);
+    destroyFlvInstance(video);
+    resetVideoElement(video);
 
     const flvPlayer = flvjs.createPlayer(
       { type: 'flv', url, isLive: true },
@@ -203,34 +260,17 @@ export default function WebLivePage() {
 
   // 清理播放器资源的统一函数
   const cleanupPlayer = () => {
+    sourceAbortControllerRef.current?.abort();
+    sourceAbortControllerRef.current = null;
+
     if (artPlayerRef.current) {
       try {
-        // 先暂停播放
-        if (artPlayerRef.current.video) {
-          artPlayerRef.current.video.pause();
-          artPlayerRef.current.video.src = '';
-          artPlayerRef.current.video.load();
-        }
+        const video = artPlayerRef.current.video as HTMLVideoElement | null;
 
-        // 销毁 HLS 实例
-        if (artPlayerRef.current.video && artPlayerRef.current.video.hls) {
-          artPlayerRef.current.video.hls.destroy();
-          artPlayerRef.current.video.hls = null;
-        }
-
-        // 销毁 FLV 实例
-        if (artPlayerRef.current.video && (artPlayerRef.current.video as any).flv) {
-          try {
-            if ((artPlayerRef.current.video as any).flv.unload) {
-              (artPlayerRef.current.video as any).flv.unload();
-            }
-            (artPlayerRef.current.video as any).flv.destroy();
-            (artPlayerRef.current.video as any).flv = null;
-          } catch (flvError) {
-            console.warn('FLV实例销毁时出错:', flvError);
-            (artPlayerRef.current.video as any).flv = null;
-          }
-        }
+        // 先销毁 MSE 播放实例，再清空 video，避免 SourceBuffer/网络请求残留。
+        destroyHlsInstance(video);
+        destroyFlvInstance(video);
+        resetVideoElement(video);
 
         // 移除所有事件监听器
         artPlayerRef.current.off('ready');
@@ -292,8 +332,16 @@ export default function WebLivePage() {
   }, []);
 
   const handleSourceClick = async (source: any) => {
+    const requestId = sourceRequestIdRef.current + 1;
+    sourceRequestIdRef.current = requestId;
+    sourceAbortControllerRef.current?.abort();
+    sourceAbortControllerRef.current = null;
+
     // 立即清理旧的播放器
     cleanupPlayer();
+
+    const abortController = new AbortController();
+    sourceAbortControllerRef.current = abortController;
 
     setCurrentSource(source);
     setIsVideoLoading(true);
@@ -307,12 +355,17 @@ export default function WebLivePage() {
     router.replace(`/web-live?${newSearchParams.toString()}`);
 
     try {
-      const res = await fetch(`/api/web-live/stream?platform=${source.platform}&roomId=${source.roomId}`);
+      const res = await fetch(`/api/web-live/stream?platform=${source.platform}&roomId=${source.roomId}`, {
+        signal: abortController.signal,
+      });
+      if (requestId !== sourceRequestIdRef.current) return;
       if (res.ok) {
         const data = await res.json();
+        if (requestId !== sourceRequestIdRef.current) return;
 
         // 等待 DOM 渲染完成后再设置 videoUrl
         const waitForDom = () => {
+          if (requestId !== sourceRequestIdRef.current || abortController.signal.aborted) return;
           if (artRef.current) {
             setVideoUrl(data.url);
             setOriginalVideoUrl(data.originalUrl || data.url);
@@ -333,13 +386,18 @@ export default function WebLivePage() {
         }
       } else {
         const data = await res.json();
+        if (requestId !== sourceRequestIdRef.current) return;
         setErrorMessage(data.error || '获取直播流失败');
       }
     } catch (err) {
+      if (abortController.signal.aborted || requestId !== sourceRequestIdRef.current) return;
       console.error('获取直播流失败:', err);
       setErrorMessage(err instanceof Error ? err.message : '获取直播流失败');
     } finally {
-      setIsVideoLoading(false);
+      if (requestId === sourceRequestIdRef.current) {
+        sourceAbortControllerRef.current = null;
+        setIsVideoLoading(false);
+      }
     }
   };
 

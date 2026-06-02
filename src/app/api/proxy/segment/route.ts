@@ -38,6 +38,7 @@ export async function GET(request: Request) {
   try {
     const decodedUrl = decodeURIComponent(url);
     response = await fetch(decodedUrl, {
+      signal: request.signal,
       headers: {
         'User-Agent': ua,
       },

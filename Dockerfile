@@ -1,20 +1,31 @@
+# syntax=docker/dockerfile:1.7
+
 # ---- 第 1 阶段：安装依赖 ----
 FROM node:24-alpine AS deps
 
-# 启用 corepack 并激活 pnpm（Node20 默认提供 corepack）
-RUN corepack enable && corepack prepare pnpm@latest --activate
+ENV PNPM_HOME=/pnpm
+ENV PATH=$PNPM_HOME:$PATH
+
+# 固定 pnpm 版本，避免每次 prepare latest 产生不可预期变化
+RUN corepack enable && corepack prepare pnpm@10.14.0 --activate
 
 WORKDIR /app
 
 # 仅复制依赖清单，提高构建缓存利用率
 COPY package.json pnpm-lock.yaml ./
 
-# 安装所有依赖（含 devDependencies，后续会裁剪）
-RUN pnpm install --frozen-lockfile
+# 使用 BuildKit cache 复用 pnpm store，依赖层失效时也能快速重装
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+  pnpm config set store-dir /pnpm/store \
+  && pnpm install --frozen-lockfile --prefer-offline
 
 # ---- 第 2 阶段：构建项目 ----
 FROM node:24-alpine AS builder
-RUN corepack enable && corepack prepare pnpm@latest --activate
+
+ENV PNPM_HOME=/pnpm
+ENV PATH=$PNPM_HOME:$PATH
+
+RUN corepack enable && corepack prepare pnpm@10.14.0 --activate
 WORKDIR /app
 
 # 复制依赖
@@ -22,20 +33,20 @@ COPY --from=deps /app/node_modules ./node_modules
 # 复制全部源代码
 COPY . .
 
-# 在构建阶段也显式设置 DOCKER_ENV，
+# 在构建阶段也显式设置 DOCKER_ENV
 ENV DOCKER_ENV=true
 
-# 生成生产构建
-RUN pnpm run build
+# 生成生产构建；复用 Next 构建缓存，减少重复打包耗时
+RUN --mount=type=cache,id=next-cache,target=/app/.next/cache \
+  pnpm run build
 
 # 使用 pnpm deploy 提取生产依赖到独立目录
-RUN pnpm deploy --filter=. --prod --legacy /tmp/prod-deps
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+  pnpm config set store-dir /pnpm/store \
+  && pnpm deploy --filter=. --prod --legacy /tmp/prod-deps
 
 # ---- 第 3 阶段：生成运行时镜像 ----
 FROM node:24-alpine AS runner
-
-# 启用 corepack 并激活 pnpm（用于安装额外依赖）
-RUN corepack enable && corepack prepare pnpm@latest --activate
 
 # 创建非 root 用户
 RUN addgroup -g 1001 -S nodejs && adduser -u 1001 -S nextjs -G nodejs
